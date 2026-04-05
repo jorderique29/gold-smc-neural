@@ -13,9 +13,23 @@ def load_mt5_csv(filename: str, base_dir: Path | None = None) -> pd.DataFrame:
     Index: 'timestamp' (UTC, datetime64[ns, UTC])
     Volume: uses TICKVOL column (VOL is always 0 from MT5 export).
     """
-    path = (base_dir or PROJECT_DIR) / filename
-    if not path.exists():
-        path = PROJECT_DIR / "data" / "raw" / filename
+    if base_dir is not None:
+        path = base_dir / filename
+        if not path.exists():
+            raise FileNotFoundError(
+                f"File not found in the provided base_dir: {path}"
+            )
+    else:
+        primary = PROJECT_DIR / filename
+        fallback = PROJECT_DIR / "data" / "raw" / filename
+        if primary.exists():
+            path = primary
+        elif fallback.exists():
+            path = fallback
+        else:
+            raise FileNotFoundError(
+                f"File '{filename}' not found. Tried:\n  {primary}\n  {fallback}"
+            )
 
     df = pd.read_csv(path, sep="\t")
 
@@ -25,7 +39,6 @@ def load_mt5_csv(filename: str, base_dir: Path | None = None) -> pd.DataFrame:
         utc=True,
     )
     df = df.set_index("timestamp")
-    df.index.name = "timestamp"
 
     df = df.rename(columns={
         "<OPEN>": "open",
