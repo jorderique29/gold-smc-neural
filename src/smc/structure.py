@@ -20,14 +20,20 @@ def detect_fractals(df: pd.DataFrame, n: int = 2) -> pd.DataFrame:
     Returns:
         df copy with added bool columns: 'swing_high', 'swing_low'
     """
+    if n < 1:
+        raise ValueError(f"n must be >= 1, got {n}")
     df = df.copy()
     n_bars = 2 * n + 1
 
     rolling_max = df["high"].rolling(n_bars, center=True).max()
     rolling_min = df["low"].rolling(n_bars, center=True).min()
 
-    df["swing_high"] = (df["high"] == rolling_max) & df["high"].notna()
-    df["swing_low"]  = (df["low"]  == rolling_min) & df["low"].notna()
+    PRICE_TOL = 1e-9
+    df["swing_high"] = (df["high"] - rolling_max).abs() < PRICE_TOL
+    df["swing_low"]  = (rolling_min - df["low"]).abs()  < PRICE_TOL
+    # Also clear NaN positions
+    df.loc[df["high"].isna(), "swing_high"] = False
+    df.loc[df["low"].isna(),  "swing_low"]  = False
 
     # Mask edges — rolling(center=True) needs n bars on each side
     df.loc[df.index[:n],  "swing_high"] = False
@@ -64,6 +70,13 @@ def detect_bos_choch(df: pd.DataFrame) -> pd.DataFrame:
             choch_bullish, choch_bearish (bool)
             trend (int: -1 / 0 / +1)
     """
+    required = {"swing_high", "swing_low"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"detect_bos_choch requires columns {required}. "
+            f"Missing: {missing}. Call detect_fractals() first."
+        )
     df = df.copy()
 
     # Price level of the last confirmed swing high / low

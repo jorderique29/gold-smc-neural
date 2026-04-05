@@ -67,8 +67,8 @@ def test_choch_bullish_requires_prior_bearish_trend():
     choch_bull_idx = df.index[df["choch_bullish"]]
     for idx in choch_bull_idx:
         pos = df.index.get_loc(idx)
-        if pos > 0:
-            assert df["trend"].iloc[pos - 1] == -1, (
+        assert pos > 0, "CHoCH cannot fire at bar 0"
+        assert df["trend"].iloc[pos - 1] == -1, (
                 f"CHoCH bullish at position {pos} requires prior trend=-1, "
                 f"got {df['trend'].iloc[pos-1]}"
             )
@@ -82,8 +82,48 @@ def test_choch_bearish_requires_prior_bullish_trend():
     choch_bear_idx = df.index[df["choch_bearish"]]
     for idx in choch_bear_idx:
         pos = df.index.get_loc(idx)
-        if pos > 0:
-            assert df["trend"].iloc[pos - 1] == 1, (
+        assert pos > 0, "CHoCH cannot fire at bar 0"
+        assert df["trend"].iloc[pos - 1] == 1, (
                 f"CHoCH bearish at position {pos} requires prior trend=+1, "
                 f"got {df['trend'].iloc[pos-1]}"
             )
+
+
+def test_bos_bullish_dominates_in_uptrend():
+    """In a sustained uptrend, bos_bullish should fire more than bos_bearish."""
+    from tests.conftest import make_ohlcv
+    import numpy as np
+    # Build a clean uptrend: each bar's close is strictly higher than the last
+    rng = np.random.default_rng(10)
+    n = 200
+    dates = pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC")
+    close = 1900.0 + np.cumsum(rng.uniform(0.1, 1.0, n))
+    high = close + rng.uniform(0.5, 2.0, n)
+    low = close - rng.uniform(0.2, 0.8, n)
+    open_ = np.roll(close, 1); open_[0] = close[0] - 0.1
+    volume = rng.integers(300, 1500, n).astype(float)
+    df = pd.DataFrame(
+        {"open": open_, "high": high, "low": low, "close": close, "volume": volume},
+        index=pd.DatetimeIndex(dates, name="timestamp"),
+    )
+    df = detect_fractals(df)
+    df = detect_bos_choch(df)
+    n_bull = df["bos_bullish"].sum()
+    n_bear = df["bos_bearish"].sum()
+    assert n_bull > n_bear, (
+        f"In an uptrend, expected more bullish BOS ({n_bull}) than bearish ({n_bear})"
+    )
+
+
+def test_detect_fractals_rejects_n_zero():
+    import pytest
+    df = make_ohlcv(20)
+    with pytest.raises(ValueError, match="n must be >= 1"):
+        detect_fractals(df, n=0)
+
+
+def test_bos_choch_requires_fractal_columns():
+    import pytest
+    df = make_ohlcv(20)  # raw df, no fractal columns
+    with pytest.raises(ValueError, match="detect_fractals"):
+        detect_bos_choch(df)
