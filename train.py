@@ -141,6 +141,17 @@ def train(
     dist = df[LABEL_DIRECTION].value_counts().sort_index()
     print(f"    Long: {dist.get(0,0):,}  Short: {dist.get(1,0):,}  No-Trade: {dist.get(2,0):,}")
 
+    # Pesos de clase balanceados (sqrt para moderar la penalizacion extrema)
+    # Con 17 OBs vs 370k No-Trade, sklearn daría w~10k — se aplica sqrt para
+    # evitar que el modelo sobre-ajuste a los pocos ejemplos Long/Short.
+    from sklearn.utils.class_weight import compute_class_weight
+    import math
+    classes   = np.array([0, 1, 2])
+    raw_w     = compute_class_weight("balanced", classes=classes,
+                                     y=df[LABEL_DIRECTION].to_numpy())
+    cw        = {i: math.sqrt(w) for i, w in enumerate(raw_w)}
+    print(f"    Class weights (sqrt-balanced): { {k: round(v,2) for k,v in cw.items()} }")
+
     # 3. Construir secuencias
     print(f"\n[3] Construyendo secuencias (ventana={seq} barras)...")
     X, y_dir, y_rr = build_sequences(df, seq, INPUT_COLS)
@@ -216,6 +227,7 @@ def train(
         validation_data=(X_val, {"direction": y_dir_val, "rr": y_rr_val}),
         epochs=epochs,
         batch_size=batch,
+        class_weight=cw,
         callbacks=callbacks,
         verbose=1,
     )

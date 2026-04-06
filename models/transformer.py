@@ -23,6 +23,9 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
+# Package name for @register_keras_serializable — all custom layers use this
+_PKG = "GoldSMC"
+
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 SEQ_LEN    = 96     # context window: 96 × 5min = 8 hours of M5 bars
 N_FEATURES = 42     # normalized input features per bar
@@ -75,6 +78,7 @@ def _apply_rope(x: tf.Tensor, freqs: tf.Tensor) -> tf.Tensor:
 
 # ── Causal Multi-Head Attention with RoPE ─────────────────────────────────────
 
+@tf.keras.utils.register_keras_serializable(package=_PKG)
 class CausalMHAWithRoPE(layers.Layer):
     """
     Causal (masked) Multi-Head Attention with Rotary Position Embeddings.
@@ -134,6 +138,7 @@ class CausalMHAWithRoPE(layers.Layer):
 
 # ── Transformer Block (Pre-Norm) ──────────────────────────────────────────────
 
+@tf.keras.utils.register_keras_serializable(package=_PKG)
 class TransformerBlock(layers.Layer):
     """
     GPT-style Transformer block with pre-LayerNorm.

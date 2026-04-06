@@ -19,11 +19,18 @@ Notas para integración MT5 (MQL5):
 """
 import argparse
 import os
+import sys
 from pathlib import Path
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 import numpy as np
+
+# Register custom Keras classes (TransformerBlock, CausalMHAWithRoPE) so that
+# load_model() can deserialize the saved .keras checkpoint without raising
+# "Could not locate class 'TransformerBlock'".
+sys.path.insert(0, str(Path(__file__).parent))
+from models.transformer import TransformerBlock, CausalMHAWithRoPE  # noqa: F401
 
 
 def check_dependencies() -> bool:
@@ -83,7 +90,13 @@ def export_to_onnx(
         )
 
     print(f"[export_onnx] Cargando modelo: {model_p}")
-    model = tf.keras.models.load_model(str(model_p))
+    model = tf.keras.models.load_model(
+        str(model_p),
+        custom_objects={
+            "TransformerBlock":  TransformerBlock,
+            "CausalMHAWithRoPE": CausalMHAWithRoPE,
+        },
+    )
     model.summary(line_length=80)
 
     # Obtener shape real del input del modelo
