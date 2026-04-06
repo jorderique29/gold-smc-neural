@@ -20,21 +20,23 @@ from sklearn.preprocessing import RobustScaler
 # ── Feature group definitions ─────────────────────────────────────────────────
 
 PRICE_FEATURES = [
+    # Only dense, always-available price columns — never sparse OB/label cols.
     "open", "high", "low", "close",
-    "ob_top", "ob_bottom", "ob_midpoint",
+    "ob_midpoint",                                   # sparse but informative; imputed to median
     "asia_high", "asia_low",
-    "h1_close", "h1_high", "h1_low", "h1_ob_midpoint",
-    "h1_asia_high", "h1_asia_low",
-    "m15_close", "m15_high", "m15_low", "m15_ob_midpoint",
-    "entry", "sl", "tp",
+    "h1_close", "h1_ob_midpoint", "h1_asia_high", "h1_asia_low",
+    "m15_close", "m15_ob_midpoint",
 ]
 
 INDICATOR_FEATURES = [
     "volume", "rsi_lagless", "atr", "vol_zscore",
     "fvg_bull_size", "fvg_bear_size",
-    "ob_freshness", "risk_price", "rr_achieved",
+    "ob_freshness",
 ]
 
+# Columns intentionally NOT scaled — includes:
+#   - binary / categorical flags
+#   - training labels and risk params (sparse columns; scaling destroys signal)
 PASSTHROUGH_FEATURES = [
     # Trend / structure flags
     "trend", "ob_type",
@@ -44,7 +46,9 @@ PASSTHROUGH_FEATURES = [
     "fvg_bull", "fvg_bear",
     "equal_high_pool", "equal_low_pool",
     "in_asia_session", "judas_swing_bull", "judas_swing_bear",
-    "dd_filter_ok",
+    # Risk / label columns — kept as-is so train.py reads correct values
+    "dd_filter_ok", "rr_achieved", "risk_price",
+    "entry", "sl", "tp",
     # M15 / H1 structure flags
     "h1_trend", "h1_bull_ob", "h1_bear_ob",
     "h1_bos_bullish", "h1_bos_bearish",

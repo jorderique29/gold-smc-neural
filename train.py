@@ -99,10 +99,14 @@ def build_sequences(
     rr        = df[LABEL_RR].fillna(0).astype(np.float32).to_numpy() \
                 if LABEL_RR in df.columns else np.zeros(len(df), dtype=np.float32)
 
-    n_seq = len(data) - seq_len
-    X     = np.lib.stride_tricks.sliding_window_view(data, (seq_len, n_feat)).reshape(n_seq, seq_len, n_feat)
-    y_dir = direction[seq_len:]
-    y_rr  = rr[seq_len:].reshape(-1, 1)
+    # sliding_window_view on (N, n_feat) with window (seq_len, n_feat) →
+    # shape (N - seq_len + 1, 1, seq_len, n_feat).
+    # We need N - seq_len windows so that each window[i] predicts at bar i + seq_len.
+    n_seq   = len(data) - seq_len
+    windows = np.lib.stride_tricks.sliding_window_view(data, (seq_len, n_feat))
+    X       = windows[:n_seq, 0, :, :]          # (n_seq, seq_len, n_feat)
+    y_dir   = direction[seq_len:]               # label at bar i + seq_len
+    y_rr    = rr[seq_len:].reshape(-1, 1)
 
     return X, y_dir, y_rr
 

@@ -16,6 +16,7 @@ PIPS_SL   = 2.0      # fixed pip buffer beyond OB edge for SL
 ATR_MULT  = 0.25     # fraction of ATR added to SL buffer
 MIN_RR    = 2.5      # minimum reward:risk ratio for TP
 LOT_SIZE  = 100.0    # oz per standard lot (XAUUSD)
+MIN_LOT   = 0.01     # minimum tradeable lot size on ADN broker
 BALANCE   = 10_000.0 # assumed account balance (USD)
 DD_LIMIT  = 0.005    # 0.5% of balance = max dollar risk per trade
 
@@ -82,7 +83,10 @@ def compute_risk_params(row: dict) -> dict:
         tp = next_ob if (0 < next_ob < rr_tp) else rr_tp
 
     rr_achieved  = abs(tp - entry) / risk if risk > 0 else 0.0
-    dollar_risk  = risk * LOT_SIZE
+    # Dollar risk at minimum lot size (0.01): risk_price * 100 oz * 0.01 lot
+    # dd_filter_ok: True when the setup is tradeable at >= MIN_LOT without
+    # exceeding the 0.5% account DD limit.
+    dollar_risk  = risk * LOT_SIZE * MIN_LOT
     dd_filter_ok = bool(dollar_risk < DD_LIMIT * BALANCE)
 
     return {
