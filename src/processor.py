@@ -121,12 +121,13 @@ class GoldQuantProcessor:
         # Add risk parameters for OB rows
         df = self._add_risk_columns(df)
 
-        # TODO (Task 10): apply RobustScaler normalization via src.features.normalizer
-        # TODO (Task 10): use src.dataset.save_parquet for column selection + compression
+        # Normalize features
+        from src.features.normalizer import normalize_features
+        df, _scalers = normalize_features(df)
 
-        # Simplified serialization for now — write full DataFrame to Parquet
-        out_path = output_dir / "gold_smc_dataset.parquet"
-        df.to_parquet(out_path, engine="pyarrow", compression="snappy", index=True)
+        # Serialize to Parquet with column selection
+        from src.dataset import save_parquet
+        out_path = save_parquet(df, output_dir / "gold_smc_dataset.parquet")
         print(f"[GoldQuantProcessor] Parquet saved -> {out_path}")
 
         return out_path
