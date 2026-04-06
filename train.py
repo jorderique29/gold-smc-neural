@@ -20,10 +20,41 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 from models.transformer import build_gold_transformer, SEQ_LEN, N_FEATURES
+
+
+# ── Callback: F1 por clase al final de cada época ────────────────────────────
+
+class PerClassF1Callback(tf.keras.callbacks.Callback):
+    """Imprime precision/recall/F1 por clase (Long, Short, NoTrade) en cada época."""
+
+    def __init__(self, val_data: np.ndarray, val_labels: np.ndarray) -> None:
+        super().__init__()
+        self.val_data   = val_data
+        self.val_labels = val_labels
+
+    def on_epoch_end(self, epoch: int, logs: dict | None = None) -> None:
+        preds    = self.model.predict(self.val_data, verbose=0)
+        pred_dir = np.argmax(preds["direction"], axis=1)
+        report   = classification_report(
+            self.val_labels, pred_dir,
+            target_names=["Long", "Short", "NoTrade"],
+            output_dict=True,
+            zero_division=0,
+        )
+        if logs is not None:
+            for cls in ["Long", "Short", "NoTrade"]:
+                logs[f"val_f1_{cls}"] = report[cls]["f1-score"]
+        print(
+            f"\n  [F1] Long={report['Long']['f1-score']:.3f}"
+            f"  Short={report['Short']['f1-score']:.3f}"
+            f"  NoTrade={report['NoTrade']['f1-score']:.3f}"
+            f"  macro={report['macro avg']['f1-score']:.3f}"
+        )
 
 # ── Columnas de features de entrada al Transformer ────────────────────────────
 # Deben coincidir con FEATURE_COLS de dataset.py, excluyendo labels
@@ -151,10 +182,15 @@ def train(
                                      y=df[LABEL_DIRECTION].to_numpy())
     cw        = {i: math.sqrt(w) for i, w in enumerate(raw_w)}
     print(f"    Class weights (sqrt-balanced): { {k: round(v,2) for k,v in cw.items()} }")
+    # Keras class_weight incompatible con multi-output; usamos sample_weight
+    # que se calcula por fila según su label antes del split temporal.
+    df["_sample_w"] = df[LABEL_DIRECTION].map(cw).fillna(cw[2])
 
     # 3. Construir secuencias
     print(f"\n[3] Construyendo secuencias (ventana={seq} barras)...")
     X, y_dir, y_rr = build_sequences(df, seq, INPUT_COLS)
+    # sample_weight alineado con las secuencias (label en bar i+seq)
+    sw_arr = df["_sample_w"].to_numpy(dtype=np.float32)[seq:]
     print(f"    X shape: {X.shape}  dtype: {X.dtype}")
     n_feat = X.shape[2]
 
@@ -167,6 +203,7 @@ def train(
     X_train, X_val, X_test = X[:n_train], X[n_train:n_train+n_val], X[n_train+n_val:]
     y_dir_train = y_dir[:n_train];  y_dir_val = y_dir[n_train:n_train+n_val];  y_dir_test = y_dir[n_train+n_val:]
     y_rr_train  = y_rr[:n_train];   y_rr_val  = y_rr[n_train:n_train+n_val];   y_rr_test  = y_rr[n_train+n_val:]
+    sw_train    = sw_arr[:n_train]
 
     print(f"    Train: {n_train:,}  Val: {n_val:,}  Test: {n_test:,}")
 
@@ -193,17 +230,18 @@ def train(
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     callbacks = [
+        PerClassF1Callback(X_val, y_dir_val),
         tf.keras.callbacks.EarlyStopping(
-            monitor="val_direction_accuracy",
-            patience=7,
+            monitor="val_loss",
+            patience=10,
             restore_best_weights=True,
-            mode="max",
+            mode="min",
         ),
         tf.keras.callbacks.ModelCheckpoint(
             filepath=str(MODEL_DIR / "gold_transformer_best.keras"),
-            monitor="val_direction_accuracy",
+            monitor="val_loss",
             save_best_only=True,
-            mode="max",
+            mode="min",
             verbose=1,
         ),
         tf.keras.callbacks.TensorBoard(
@@ -224,10 +262,10 @@ def train(
     history = model.fit(
         X_train,
         {"direction": y_dir_train, "rr": y_rr_train},
+        sample_weight=sw_train,
         validation_data=(X_val, {"direction": y_dir_val, "rr": y_rr_val}),
         epochs=epochs,
         batch_size=batch,
-        class_weight=cw,
         callbacks=callbacks,
         verbose=1,
     )

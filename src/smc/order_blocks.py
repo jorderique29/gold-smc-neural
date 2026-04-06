@@ -20,15 +20,28 @@ All 4 filters must be satisfied for an OB to be flagged:
 import numpy as np
 import pandas as pd
 
-LOOKAHEAD      = 20    # bars to look forward for a confirming BOS/CHoCH
-VOL_ZSCORE_MIN = 1.5   # minimum volume z-score on the confirming break bar
 VOL_WINDOW     = 50    # rolling window for volume z-score calculation
+
+OB_PROFILES = {
+    "strict": {
+        "lookahead":      20,
+        "vol_zscore_min": 1.5,
+        "fvg_window":     1,    # solo i+1
+        "sweep_lookback": 1,    # solo i-1
+    },
+    "relaxed": {
+        "lookahead":      48,
+        "vol_zscore_min": 0.8,
+        "fvg_window":     2,    # i+1 o i+2
+        "sweep_lookback": 3,    # i-1, i-2, i-3
+    },
+}
 
 _REQUIRED = {"bos_bullish", "bos_bearish", "choch_bullish", "choch_bearish",
              "fvg_bull", "fvg_bear", "volume"}
 
 
-def detect_order_blocks(df: pd.DataFrame) -> pd.DataFrame:
+def detect_order_blocks(df: pd.DataFrame, mode: str = "relaxed") -> pd.DataFrame:
     """
     Detect high-probability Order Blocks using all 4 SMC filters.
 
@@ -45,6 +58,11 @@ def detect_order_blocks(df: pd.DataFrame) -> pd.DataFrame:
         ob_bottom   (float) : OB low  (NaN if not an OB)
         ob_midpoint (float) : (ob_top + ob_bottom) / 2  (NaN if not an OB)
         ob_type     (int)   : 1 = bull OB, -1 = bear OB, 0 = none
+
+    Args:
+        df:   DataFrame con columnas requeridas.
+        mode: "strict" (original 4-filter) o "relaxed" (Phase 2, más señales).
+              Default: "relaxed".
     """
     missing = _REQUIRED - set(df.columns)
     if missing:
@@ -53,6 +71,14 @@ def detect_order_blocks(df: pd.DataFrame) -> pd.DataFrame:
             f"Missing: {missing}. Run detect_fractals, detect_bos_choch, "
             f"detect_fvg first."
         )
+
+    if mode not in OB_PROFILES:
+        raise ValueError(f"mode must be one of {list(OB_PROFILES)}. Got: {mode!r}")
+    cfg           = OB_PROFILES[mode]
+    LOOKAHEAD_    = cfg["lookahead"]
+    VOL_ZSCORE_   = cfg["vol_zscore_min"]
+    FVG_WINDOW_   = cfg["fvg_window"]
+    SWEEP_LB_     = cfg["sweep_lookback"]
 
     df = df.copy()
 
@@ -81,24 +107,26 @@ def detect_order_blocks(df: pd.DataFrame) -> pd.DataFrame:
     bull_ob = np.zeros(n, dtype=bool)
     bear_ob = np.zeros(n, dtype=bool)
 
-    for i in range(1, n - LOOKAHEAD):
+    for i in range(1, n - LOOKAHEAD_):
 
         # ── Bullish OB candidate: bearish candle ──────────────────────────
         if close_arr[i] < open_arr[i]:
 
-            # F3: swept prior bar's low
-            if low_arr[i] >= low_arr[i - 1]:
+            # F3: swept prior bars' low (within sweep_lookback)
+            sweep_start = max(0, i - SWEEP_LB_)
+            if not any(low_arr[i] < low_arr[j] for j in range(sweep_start, i)):
                 continue
 
-            # F2: FVG on the very next bar
-            if i + 1 >= n or not fvg_bull_arr[i + 1]:
+            # F2: FVG on any of the next fvg_window bars
+            fvg_end = min(i + 1 + FVG_WINDOW_, n)
+            if not any(fvg_bull_arr[i + 1 : fvg_end]):
                 continue
 
             # F1 + F4: confirming BOS/CHoCH with high volume in lookahead window
-            end = min(i + 1 + LOOKAHEAD, n)
+            end = min(i + 1 + LOOKAHEAD_, n)
             confirmed = False
             for k in range(i + 1, end):
-                if (bos_bull[k] or choch_bull[k]) and vol_z[k] > VOL_ZSCORE_MIN:
+                if (bos_bull[k] or choch_bull[k]) and vol_z[k] > VOL_ZSCORE_:
                     confirmed = True
                     break
             if confirmed:
@@ -107,19 +135,21 @@ def detect_order_blocks(df: pd.DataFrame) -> pd.DataFrame:
         # ── Bearish OB candidate: bullish candle ──────────────────────────
         elif close_arr[i] > open_arr[i]:
 
-            # F3: swept prior bar's high
-            if high_arr[i] <= high_arr[i - 1]:
+            # F3: swept prior bars' high (within sweep_lookback)
+            sweep_start = max(0, i - SWEEP_LB_)
+            if not any(high_arr[i] > high_arr[j] for j in range(sweep_start, i)):
                 continue
 
-            # F2: FVG on the very next bar
-            if i + 1 >= n or not fvg_bear_arr[i + 1]:
+            # F2: FVG on any of the next fvg_window bars
+            fvg_end = min(i + 1 + FVG_WINDOW_, n)
+            if not any(fvg_bear_arr[i + 1 : fvg_end]):
                 continue
 
             # F1 + F4: confirming BOS/CHoCH with high volume in lookahead window
-            end = min(i + 1 + LOOKAHEAD, n)
+            end = min(i + 1 + LOOKAHEAD_, n)
             confirmed = False
             for k in range(i + 1, end):
-                if (bos_bear[k] or choch_bear[k]) and vol_z[k] > VOL_ZSCORE_MIN:
+                if (bos_bear[k] or choch_bear[k]) and vol_z[k] > VOL_ZSCORE_:
                     confirmed = True
                     break
             if confirmed:

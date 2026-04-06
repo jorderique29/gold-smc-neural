@@ -44,11 +44,13 @@ class GoldQuantProcessor:
         m15_file:  str,
         h1_file:   str,
         fractal_n: int = 2,
+        ob_mode:   str = "relaxed",
     ) -> None:
         self.m5_file   = m5_file
         self.m15_file  = m15_file
         self.h1_file   = h1_file
         self.fractal_n = fractal_n
+        self.ob_mode   = ob_mode
 
         self.m5:      Optional[pd.DataFrame] = None
         self.m15:     Optional[pd.DataFrame] = None
@@ -70,9 +72,9 @@ class GoldQuantProcessor:
         print(f"  M5: {len(raw_m5):,}  M15: {len(raw_m15):,}  H1: {len(raw_h1):,}")
 
         print("[GoldQuantProcessor] Running SMC pipeline ...")
-        self.m5  = self._smc_pipeline(raw_m5,  self.fractal_n)
-        self.m15 = self._smc_pipeline(raw_m15, self.fractal_n)
-        self.h1  = self._smc_pipeline_h1(raw_h1, self.fractal_n)
+        self.m5  = self._smc_pipeline(raw_m5,  self.fractal_n, self.ob_mode)
+        self.m15 = self._smc_pipeline(raw_m15, self.fractal_n, self.ob_mode)
+        self.h1  = self._smc_pipeline_h1(raw_h1, self.fractal_n, self.ob_mode)
         print("[GoldQuantProcessor] detect_smc() complete.")
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -137,7 +139,7 @@ class GoldQuantProcessor:
     # ──────────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _smc_pipeline(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    def _smc_pipeline(df: pd.DataFrame, n: int, ob_mode: str = "relaxed") -> pd.DataFrame:
         """
         Run the full SMC feature pipeline for M5 or M15 data.
 
@@ -148,7 +150,7 @@ class GoldQuantProcessor:
         df = detect_fractals(df, n=n)
         df = detect_bos_choch(df)
         df = detect_fvg(df)
-        df = detect_order_blocks(df)
+        df = detect_order_blocks(df, mode=ob_mode)
         df = detect_equal_highs_lows(df)
         df = detect_asia_session(df)
         df = add_rsi_lagless(df)
@@ -157,11 +159,11 @@ class GoldQuantProcessor:
         return df
 
     @staticmethod
-    def _smc_pipeline_h1(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    def _smc_pipeline_h1(df: pd.DataFrame, n: int, ob_mode: str = "relaxed") -> pd.DataFrame:
         """
         H1 pipeline: same as M5/M15 plus previous-day high/low (PD Arrays).
         """
-        df = GoldQuantProcessor._smc_pipeline(df, n)
+        df = GoldQuantProcessor._smc_pipeline(df, n, ob_mode)
         # Previous-day High/Low: resample daily, shift 1 day forward
         daily_high = df["high"].resample("D").max()
         daily_low  = df["low"].resample("D").min()
@@ -223,3 +225,36 @@ def _add_ob_freshness(df: pd.DataFrame) -> pd.DataFrame:
 
     df["ob_freshness"] = freshness
     return df
+
+
+if __name__ == "__main__":
+    import argparse, warnings
+    parser = argparse.ArgumentParser(description="Run GoldQuantProcessor pipeline")
+    parser.add_argument("--ob-mode", default="relaxed", choices=["strict", "relaxed"])
+    parser.add_argument("--m5",  default="xauusd_m5_history.csv")
+    parser.add_argument("--m15", default="xauusd_m15_history.csv")
+    parser.add_argument("--h1",  default="xauusd_h1_history.csv")
+    parser.add_argument("--out", default="data/processed")
+    args = parser.parse_args()
+
+    suffix = f"_{args.ob_mode}" if args.ob_mode != "relaxed" else ""
+    out_file = f"gold_smc_dataset{suffix}.parquet"
+
+    print(f"\n=== GoldQuantProcessor | ob_mode={args.ob_mode} ===\n")
+    proc = GoldQuantProcessor(args.m5, args.m15, args.h1, ob_mode=args.ob_mode)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        proc.detect_smc()
+        proc.align_timeframes()
+
+    df_aligned = proc.aligned
+    bull_obs = int(df_aligned["bull_ob"].sum())
+    bear_obs = int(df_aligned["bear_ob"].sum())
+    print(f"\n  Bull OBs: {bull_obs}  |  Bear OBs: {bear_obs}  |  Total: {bull_obs+bear_obs}")
+
+    out = proc.generate_training_tensors(args.out)
+    import pandas as _pd
+    df_final = _pd.read_parquet(out)
+    dist = df_final["ob_type"].value_counts().sort_index()
+    print(f"  ob_type dist: {dist.to_dict()}")
+    print(f"\nDataset guardado -> {out}")
