@@ -12,6 +12,7 @@ Three-stage usage:
 """
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -186,8 +187,12 @@ class GoldQuantProcessor:
                 params = compute_risk_params(row_dict)
                 for col, val in params.items():
                     df.at[idx, col] = val
-            except Exception:
-                pass  # skip malformed rows silently
+            except (ValueError, KeyError, TypeError, ZeroDivisionError) as exc:
+                warnings.warn(
+                    f"compute_risk_params skipped for index {idx}: {type(exc).__name__}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         return df
 
