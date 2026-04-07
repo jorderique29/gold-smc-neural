@@ -27,6 +27,38 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 from models.transformer import build_gold_transformer, SEQ_LEN, N_FEATURES
 
 
+# ── Focal Loss ────────────────────────────────────────────────────────────────
+
+class SparseFocalLoss(tf.keras.losses.Loss):
+    """
+    Focal Loss para clasificación multiclase con labels enteros (sparse).
+
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+    gamma=2 concentra el gradiente en ejemplos difíciles (Long/Short),
+    reduciendo la contribución de los ejemplos fáciles (No-Trade con
+    alta confianza), lo que fuerza al modelo a aprender las clases
+    minoritarias en presencia de desbalanceo extremo.
+    """
+
+    def __init__(self, gamma: float = 2.0, name: str = "sparse_focal_loss") -> None:
+        super().__init__(name=name)
+        self.gamma = gamma
+
+    def call(self, y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
+        y_true   = tf.cast(tf.reshape(y_true, [-1]), tf.int32)
+        n_cls    = tf.shape(y_pred)[-1]
+        y_onehot = tf.one_hot(y_true, n_cls)               # (batch, 3)
+        p_t      = tf.reduce_sum(y_pred * y_onehot, axis=-1)  # prob de clase correcta
+        p_t      = tf.clip_by_value(p_t, 1e-7, 1.0)
+        focal_w  = tf.pow(1.0 - p_t, self.gamma)
+        loss     = -focal_w * tf.math.log(p_t)
+        return tf.reduce_mean(loss)
+
+    def get_config(self) -> dict:
+        return {**super().get_config(), "gamma": self.gamma}
+
+
 # ── Callback: F1 por clase al final de cada época ────────────────────────────
 
 class PerClassF1Callback(tf.keras.callbacks.Callback):
@@ -180,8 +212,11 @@ def train(
     classes   = np.array([0, 1, 2])
     raw_w     = compute_class_weight("balanced", classes=classes,
                                      y=df[LABEL_DIRECTION].to_numpy())
-    cw        = {i: math.sqrt(w) for i, w in enumerate(raw_w)}
-    print(f"    Class weights (sqrt-balanced): { {k: round(v,2) for k,v in cw.items()} }")
+    # Pesos crudos (sin sqrt) — más agresivos que Phase 2 (sqrt).
+    # Con Focal Loss (γ=2) ya hay penalización intrínseca de ejemplos fáciles,
+    # pero los sample_weight siguen siendo necesarios para amplificar Long/Short.
+    cw        = {i: float(w) for i, w in enumerate(raw_w)}
+    print(f"    Class weights (raw-balanced):  { {k: round(v,2) for k,v in cw.items()} }")
     # Keras class_weight incompatible con multi-output; usamos sample_weight
     # que se calcula por fila según su label antes del split temporal.
     df["_sample_w"] = df[LABEL_DIRECTION].map(cw).fillna(cw[2])
@@ -217,7 +252,7 @@ def train(
     model.compile(
         optimizer=tf.keras.optimizers.AdamW(learning_rate=lr, weight_decay=1e-5),
         loss={
-            "direction": tf.keras.losses.SparseCategoricalCrossentropy(),
+            "direction": SparseFocalLoss(gamma=2.0),
             "rr":        tf.keras.losses.Huber(delta=0.5),
         },
         loss_weights={"direction": 1.0, "rr": 0.3},
