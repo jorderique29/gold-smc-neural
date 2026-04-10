@@ -1,0 +1,260 @@
+# src/processor.py
+"""
+GoldQuantProcessor — main orchestrator for the XAUUSD SMC feature pipeline.
+
+Three-stage usage:
+    proc = GoldQuantProcessor("xauusd_m5_history.csv",
+                              "xauusd_m15_history.csv",
+                              "xauusd_h1_history.csv")
+    proc.detect_smc()
+    proc.align_timeframes()
+    proc.generate_training_tensors(output_dir="data/processed")
+"""
+from __future__ import annotations
+
+import warnings
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+
+from src.loader import load_mt5_csv
+from src.smc.structure import detect_fractals, detect_bos_choch
+from src.smc.fvg import detect_fvg
+from src.smc.order_blocks import detect_order_blocks
+from src.smc.liquidity import detect_equal_highs_lows, detect_asia_session
+from src.features.technical import add_rsi_lagless, add_atr
+from src.alignment import align_timeframes as _align_tf
+from src.risk import compute_risk_params
+
+
+class GoldQuantProcessor:
+    """
+    Orchestrates the full SMC feature extraction pipeline for XAUUSD.
+
+    Attributes:
+        m5, m15, h1  : processed DataFrames per timeframe (set by detect_smc)
+        aligned       : M5 DataFrame enriched with M15/H1 features (set by align_timeframes)
+    """
+
+    def __init__(
+        self,
+        m5_file:   str,
+        m15_file:  str,
+        h1_file:   str,
+        fractal_n: int = 2,
+        ob_mode:   str = "relaxed",
+    ) -> None:
+        self.m5_file   = m5_file
+        self.m15_file  = m15_file
+        self.h1_file   = h1_file
+        self.fractal_n = fractal_n
+        self.ob_mode   = ob_mode
+
+        self.m5:      Optional[pd.DataFrame] = None
+        self.m15:     Optional[pd.DataFrame] = None
+        self.h1:      Optional[pd.DataFrame] = None
+        self.aligned: Optional[pd.DataFrame] = None
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def detect_smc(self) -> None:
+        """
+        Load the three CSV files and run the full SMC detection pipeline
+        on each timeframe independently.
+
+        Populates: self.m5, self.m15, self.h1
+        """
+        print("[GoldQuantProcessor] Loading CSVs ...")
+        raw_m5  = load_mt5_csv(self.m5_file)
+        raw_m15 = load_mt5_csv(self.m15_file)
+        raw_h1  = load_mt5_csv(self.h1_file)
+        print(f"  M5: {len(raw_m5):,}  M15: {len(raw_m15):,}  H1: {len(raw_h1):,}")
+
+        print("[GoldQuantProcessor] Running SMC pipeline ...")
+        self.m5  = self._smc_pipeline(raw_m5,  self.fractal_n, self.ob_mode)
+        self.m15 = self._smc_pipeline(raw_m15, self.fractal_n, self.ob_mode)
+        self.h1  = self._smc_pipeline_h1(raw_h1, self.fractal_n, self.ob_mode)
+        print("[GoldQuantProcessor] detect_smc() complete.")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def align_timeframes(self) -> None:
+        """
+        Merge M15 and H1 SMC features into the M5 DataFrame without look-ahead bias.
+
+        Requires: detect_smc() called first.
+        Populates: self.aligned
+        """
+        if self.m5 is None or self.m15 is None or self.h1 is None:
+            raise RuntimeError(
+                "Call detect_smc() before align_timeframes()."
+            )
+
+        print("[GoldQuantProcessor] Aligning timeframes ...")
+        self.aligned = _align_tf(self.m5, self.m15, self.h1)
+        print(f"  Aligned shape: {self.aligned.shape}")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def generate_training_tensors(
+        self,
+        output_dir: str | Path = "data/processed",
+    ) -> Path:
+        """
+        Add risk columns to the aligned DataFrame and serialize to Parquet.
+
+        Requires: align_timeframes() called first.
+
+        Args:
+            output_dir: directory where the .parquet file will be written.
+
+        Returns:
+            Path to the written Parquet file.
+        """
+        if self.aligned is None:
+            raise RuntimeError(
+                "Call align_timeframes() before generate_training_tensors()."
+            )
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        df = self.aligned.copy()
+
+        # Add risk parameters for OB rows
+        df = self._add_risk_columns(df)
+
+        # Normalize features
+        from src.features.normalizer import normalize_features
+        df, _scalers = normalize_features(df)
+
+        # Serialize to Parquet with column selection
+        from src.dataset import save_parquet
+        out_path = save_parquet(df, output_dir / "gold_smc_dataset.parquet")
+        print(f"[GoldQuantProcessor] Parquet saved -> {out_path}")
+
+        return out_path
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Private helpers
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _smc_pipeline(df: pd.DataFrame, n: int, ob_mode: str = "relaxed") -> pd.DataFrame:
+        """
+        Run the full SMC feature pipeline for M5 or M15 data.
+
+        Order of operations:
+            fractals -> BOS/CHoCH -> FVG -> OB -> equal H/L -> Asia session
+            -> RSI-Lagless -> ATR -> OB freshness
+        """
+        df = detect_fractals(df, n=n)
+        df = detect_bos_choch(df)
+        df = detect_fvg(df)
+        df = detect_order_blocks(df, mode=ob_mode)
+        df = detect_equal_highs_lows(df)
+        df = detect_asia_session(df)
+        df = add_rsi_lagless(df)
+        df = add_atr(df)
+        df = _add_ob_freshness(df)
+        return df
+
+    @staticmethod
+    def _smc_pipeline_h1(df: pd.DataFrame, n: int, ob_mode: str = "relaxed") -> pd.DataFrame:
+        """
+        H1 pipeline: same as M5/M15 plus previous-day high/low (PD Arrays).
+        """
+        df = GoldQuantProcessor._smc_pipeline(df, n, ob_mode)
+        # Previous-day High/Low: resample daily, shift 1 day forward
+        daily_high = df["high"].resample("D").max()
+        daily_low  = df["low"].resample("D").min()
+        df["prev_day_high"] = daily_high.shift(1).reindex(df.index, method="ffill")
+        df["prev_day_low"]  = daily_low.shift(1).reindex(df.index,  method="ffill")
+        return df
+
+    @staticmethod
+    def _add_risk_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Compute entry/sl/tp/dd_filter_ok for each OB row using compute_risk_params().
+        Non-OB rows get NaN for float columns and False for dd_filter_ok.
+        """
+        risk_float_cols = ["entry", "sl", "tp", "risk_price", "rr_achieved"]
+        for col in risk_float_cols:
+            df[col] = np.nan
+        df["dd_filter_ok"] = False
+
+        ob_mask = df["ob_type"] != 0
+        for idx in df.index[ob_mask]:
+            row_dict = df.loc[idx].to_dict()
+            row_dict.setdefault("next_unmit_ob_h1", 0)
+            try:
+                params = compute_risk_params(row_dict)
+                for col, val in params.items():
+                    df.at[idx, col] = val
+            except (ValueError, KeyError, TypeError, ZeroDivisionError) as exc:
+                warnings.warn(
+                    f"compute_risk_params skipped for index {idx}: {type(exc).__name__}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        return df
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Module-level helper (used by _smc_pipeline)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _add_ob_freshness(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add 'ob_freshness' column: number of bars since the most recent OB was formed.
+    - 0 on the OB bar itself
+    - Increments by 1 each subsequent bar
+    - NaN until the first OB appears
+    """
+    df = df.copy()
+    ob_any    = (df["bull_ob"] | df["bear_ob"]).to_numpy()
+    freshness = np.full(len(df), np.nan)
+    counter   = np.nan
+
+    for i in range(len(df)):
+        if ob_any[i]:
+            counter = 0.0
+        if not np.isnan(counter):
+            freshness[i] = counter
+            counter += 1.0
+
+    df["ob_freshness"] = freshness
+    return df
+
+
+if __name__ == "__main__":
+    import argparse, warnings
+    parser = argparse.ArgumentParser(description="Run GoldQuantProcessor pipeline")
+    parser.add_argument("--ob-mode", default="relaxed", choices=["strict", "relaxed"])
+    parser.add_argument("--m5",  default="xauusd_m5_history.csv")
+    parser.add_argument("--m15", default="xauusd_m15_history.csv")
+    parser.add_argument("--h1",  default="xauusd_h1_history.csv")
+    parser.add_argument("--out", default="data/processed")
+    args = parser.parse_args()
+
+    suffix = f"_{args.ob_mode}" if args.ob_mode != "relaxed" else ""
+    out_file = f"gold_smc_dataset{suffix}.parquet"
+
+    print(f"\n=== GoldQuantProcessor | ob_mode={args.ob_mode} ===\n")
+    proc = GoldQuantProcessor(args.m5, args.m15, args.h1, ob_mode=args.ob_mode)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        proc.detect_smc()
+        proc.align_timeframes()
+
+    df_aligned = proc.aligned
+    bull_obs = int(df_aligned["bull_ob"].sum())
+    bear_obs = int(df_aligned["bear_ob"].sum())
+    print(f"\n  Bull OBs: {bull_obs}  |  Bear OBs: {bear_obs}  |  Total: {bull_obs+bear_obs}")
+
+    out = proc.generate_training_tensors(args.out)
+    import pandas as _pd
+    df_final = _pd.read_parquet(out)
+    dist = df_final["ob_type"].value_counts().sort_index()
+    print(f"  ob_type dist: {dist.to_dict()}")
+    print(f"\nDataset guardado -> {out}")
